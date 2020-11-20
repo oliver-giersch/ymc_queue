@@ -1,4 +1,5 @@
 #include <stdexcept>
+
 #include "private/queue_private.hpp"
 
 #include "private/ordering.hpp"
@@ -11,7 +12,7 @@ constexpr T* top_ptr() {
 
 /** Check ... */
 node_t* check(
-    std::atomic<uint64_t>& peer_hzd_node_id,
+    const std::atomic<uint64_t>& peer_hzd_node_id,
     node_t* curr,
     node_t* old
 ) {
@@ -30,7 +31,7 @@ node_t* check(
 /** ??? */
 node_t* update(
     std::atomic<node_t*>& peer_node,
-    std::atomic<uint64_t>& peer_hzd_node_id,
+    const std::atomic<uint64_t>& peer_hzd_node_id,
     node_t* curr,
     node_t* old
 ) {
@@ -91,7 +92,7 @@ erased_queue_t::erased_queue_t(size_t max_threads):
   this->Hp.store(node, RLX);
 
   for (auto i = 0; i < max_threads; ++i) {
-    this->m_handles.emplace_back(node, max_threads);
+    this->m_handles.emplace_back(i,node, max_threads);
   }
 
   for (auto i = 0; auto& handle : this->m_handles) {
@@ -99,6 +100,8 @@ erased_queue_t::erased_queue_t(size_t max_threads):
     handle.next = next;
     handle.Eh = next;
     handle.Dh = next;
+
+    i += 1;
   }
 }
 
@@ -113,9 +116,7 @@ erased_queue_t::~erased_queue_t() noexcept {
 
   // delete any remaining thread-local spare nodes
   for (auto& handle : this->m_handles) {
-    if (handle.spare != nullptr) {
-      delete handle.spare;
-    }
+    delete handle.spare;
   }
 }
 
@@ -185,7 +186,7 @@ void erased_queue_t::cleanup(handle_t& th) {
    return;
  }
 
- if (new_node->id - oid < this->m_max_threads * 2) {
+ if (new_node->id - oid < (this->m_max_threads * 2)) {
    return;
  }
 
@@ -260,8 +261,8 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
     enq_req_t* expected = nullptr;
 
     if (cell.enq.compare_exchange_strong(expected, &enq) && cell.val.load(RLX) != top_ptr<enq_req_t>()) {
-      if (enq.id.compare_exchange_strong(id, -1, RLX_CAS)) {
-        id = -1;
+      if (enq.id.compare_exchange_strong(id, -i, RLX_CAS)) {
+        id = -i;
       }
 
       break;
@@ -272,7 +273,7 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
   auto& cell = find_cell(th.Ep, th, id);
   if (id > i) {
     auto lEi = this->Ei.load(RLX);
-    while (lEi <= id && !this->Ei.compare_exchange_weak(lEi, id + 1, RLX_CAS));
+    while (lEi <= id && !this->Ei.compare_exchange_weak(lEi, id + 1, RLX_CAS)) {}
   }
 
   cell.val.store(elem, RLX);

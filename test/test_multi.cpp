@@ -22,7 +22,7 @@ int main() {
   }
 
   std::vector<std::thread> threads{};
-  threads.reserve(thread_count);
+  threads.reserve(thread_count * 2);
 
   std::atomic_bool start{ false };
   std::atomic_uint64_t sum{ 0 };
@@ -63,7 +63,7 @@ int main() {
   }
 
   const auto res = sum.load();
-  const auto expected = count * (count - 1) / 2;
+  const auto expected = thread_count * (count * (count - 1) / 2);
   if (res != expected) {
     std::cerr << "incorrect element sum, got " << sum << ", expected " << expected << std::endl;
     return 1;

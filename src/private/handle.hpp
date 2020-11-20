@@ -12,14 +12,16 @@ namespace ymc::detail {
 constexpr auto MAX_U64 = std::numeric_limits<uint64_t>::max();
 struct handle_t {
   /** constructor */
-  handle_t(node_t* node, size_t max_threads):
-    Ep{ node }, Dp{ node }, handles{ max_threads }
+  handle_t(size_t thread_id, node_t* node, size_t max_threads):
+    thread_id{ thread_id }, Ep{ node }, Dp{ node }, handles{ max_threads }
   {
     for (auto i = 0; i < max_threads; ++i) {
       this->handles.push_back(nullptr);
     }
   }
 
+  /** Thread handle id. */
+  std::size_t thread_id;
   /** Pointer to the next handle. */
   handle_t* next{ nullptr };
   /** Hazard pointer. */
