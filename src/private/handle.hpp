@@ -36,7 +36,7 @@ struct handle_t {
   deq_req_t Dr{ 0, -1 };
   /** Handle of the next enqueue to help. */
   handle_t* Eh{ nullptr };
-  std::atomic_int64_t Ei{ 0 };
+  int64_t Ei{ 0 };
   /** Handle of the next dequeue to help. */
   handle_t* Dh{ nullptr };
   /** Pointer to a spare node to use, to speedup adding a new node. */

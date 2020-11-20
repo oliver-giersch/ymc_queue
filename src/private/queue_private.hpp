@@ -16,7 +16,7 @@ public:
   explicit erased_queue_t(std::size_t max_threads = 128);
   ~erased_queue_t() noexcept;
 
-  void enqueue(void* v, std::size_t thread_id);
+  void enqueue(void* elem, std::size_t thread_id);
   void* dequeue(std::size_t thread_id);
 
   erased_queue_t(const erased_queue_t&)                  = delete;
@@ -29,7 +29,7 @@ private:
 
   void cleanup(handle_t& th);
 
-  bool  enq_fast(void* v, handle_t& th, int64_t& id);
+  bool  enq_fast(void* elem, handle_t& th, int64_t& id);
   void  enq_slow(void* elem, handle_t& th, int64_t id);
   void* help_enq(cell_t& c, handle_t& th, int64_t i);
 
