@@ -10,6 +10,12 @@ constexpr T* top_ptr() {
   return reinterpret_cast<T*>(std::numeric_limits<size_t>::max());
 }
 
+/*void* spin(std::atomic<void*>& ptr) {
+  for (auto spin = 0; spin < 100; ++spin) {
+
+  }
+}*/
+
 /** Check ... */
 node_t* check(
     const std::atomic<uint64_t>& peer_hzd_node_id,
@@ -17,6 +23,7 @@ node_t* check(
     node_t* old
 ) {
   const auto hzd_node_id = peer_hzd_node_id.load(ACQ);
+
   if (hzd_node_id < curr->id) {
     auto tmp = old;
     while (tmp->id < hzd_node_id) {
@@ -36,8 +43,9 @@ node_t* update(
     node_t* old
 ) {
   auto node = peer_node.load(ACQ);
+
   if (node->id < curr->id) {
-    if (!peer_node.compare_exchange_strong(node, curr)) {
+    if (!peer_node.compare_exchange_strong(node, curr, SEQ_CST_CAS)) {
       if (node->id < curr->id) {
         curr = node;
       }
@@ -92,7 +100,7 @@ erased_queue_t::erased_queue_t(size_t max_threads):
   this->Hp.store(node, RLX);
 
   for (auto i = 0; i < max_threads; ++i) {
-    this->m_handles.emplace_back(i,node, max_threads);
+    this->m_handles.emplace_back(i, node, max_threads);
   }
 
   for (auto i = 0; auto& handle : this->m_handles) {
@@ -235,7 +243,7 @@ void erased_queue_t::cleanup(handle_t& th) {
 /********** private methods (enqueue) *****************************************/
 
 bool erased_queue_t::enq_fast(void* elem, handle_t& th, int64_t& id) {
-  const auto i = this->Ei.fetch_add(1, std::memory_order_seq_cst);
+  const auto i = this->Ei.fetch_add(1, SEQ_CST);
   auto& cell = find_cell(th.Ep, th, i);
   void* cell_val = nullptr;
 
@@ -258,9 +266,9 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
   do {
     i = this->Ei.fetch_add(1, RLX);
     auto& cell = find_cell(tail, th, i);
-    enq_req_t* expected = nullptr;
 
-    if (cell.enq.compare_exchange_strong(expected, &enq) && cell.val.load(RLX) != top_ptr<enq_req_t>()) {
+    enq_req_t* expected = nullptr;
+    if (cell.enq.compare_exchange_strong(expected, &enq, SEQ_CST_CAS) && cell.val.load(RLX) != top_ptr<enq_req_t>()) {
       if (enq.id.compare_exchange_strong(id, -i, RLX_CAS)) {
         id = -i;
       }
@@ -269,7 +277,7 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
     }
   } while (enq.id.load(RLX) > 0);
 
-  id = -1 * enq.id.load(RLX);
+  id = -enq.id.load(RLX);
   auto& cell = find_cell(th.Ep, th, id);
   if (id > i) {
     auto lEi = this->Ei.load(RLX);
@@ -280,13 +288,13 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
 }
 
 void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
-  auto res = cell.val.load(RLX);
+  auto res = cell.val.load(ACQ);
 
   if (res != top_ptr<void>() && res != nullptr) {
     return res;
   }
 
-  if (res == nullptr && !cell.val.compare_exchange_strong(res, top_ptr<void>())) {
+  if (res == nullptr && !cell.val.compare_exchange_strong(res, top_ptr<void>(), SEQ_CST_CAS)) {
     if (res != top_ptr<void>()) {
       return res;
     }
@@ -333,7 +341,7 @@ void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
   } else {
     if ((enq_id > 0 && enq->id.compare_exchange_strong(enq_id, -i, RLX_CAS)) || (enq_id == -i && cell.val.load(RLX) == top_ptr<void>())) {
       auto lEi = this->Ei.load(RLX);
-      while (lEi <= i && !this->Ei.compare_exchange_strong(lEi, i + 1, RLX_CAS));
+      while (lEi <= i && !this->Ei.compare_exchange_strong(lEi, i + 1, RLX_CAS)) {}
       cell.val.store(enq_val, RLX);
     }
   }
@@ -345,7 +353,7 @@ void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
 
 void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
   // increment dequeue index
-  const auto i = this->Di.fetch_add(1);
+  const auto i = this->Di.fetch_add(1, SEQ_CST);
   auto& cell = find_cell(th.Dp, th, i);
   void* res = this->help_enq(cell, th, i);
   deq_req_t* cd = nullptr;
@@ -369,7 +377,7 @@ void* erased_queue_t::deq_slow(handle_t& th, int64_t id) {
 
   this->help_deq(th, th);
 
-  auto i = -1 * deq.idx.load(RLX);
+  const auto i = -1 * deq.idx.load(RLX);
   auto& cell = find_cell(th.Dp, th, i);
   auto res = cell.val.load(RLX);
 
@@ -387,7 +395,8 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
 
   auto& lDp = ph.Dp;
   const auto hzd_node_id = ph.hzd_node_id.load(RLX);
-  th.hzd_node_id.store(hzd_node_id, SEQ_CST);
+  th.hzd_node_id.store(hzd_node_id, RLX);
+  std::atomic_thread_fence(SEQ_CST);
   idx = deq.idx.load(RLX);
 
   auto i = id + 1;
@@ -420,14 +429,14 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
       }
     }
 
-    if (idx < 0 || deq.id.load(std::memory_order_relaxed) != id) {
+    if (idx < 0 || deq.id.load(RLX) != id) {
       break;
     }
 
     auto& cell = find_cell(lDp, th, idx);
     deq_req_t* cd = nullptr;
     if (cell.val.load(RLX) == top_ptr<void>() || cell.deq.compare_exchange_strong(cd, &deq, RLX_CAS) || cd == &deq) {
-      deq.idx.compare_exchange_strong(idx, -idx);
+      deq.idx.compare_exchange_strong(idx, -idx, RLX_CAS);
       break;
     }
 
