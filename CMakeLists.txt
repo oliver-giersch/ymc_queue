@@ -7,17 +7,17 @@ add_subdirectory(lib/wfqueue)
 
 find_package(Threads REQUIRED)
 
-add_library(ymc_queue src/queue.cpp)
-target_include_directories(ymc_queue PUBLIC include/ src/)
-target_link_libraries(ymc_queue PUBLIC wfqueue)
+add_library(ymcqueue src/queue.cpp)
+target_include_directories(ymcqueue PUBLIC include/ src/)
+target_link_libraries(ymcqueue PUBLIC wfqueue)
 
 add_executable(test_single test/test_single.cpp)
-target_link_libraries(test_single PUBLIC ymc_queue)
+target_link_libraries(test_single PUBLIC ymcqueue)
 target_compile_options(test_single PRIVATE "-fsanitize=address")
 target_link_options(test_single PRIVATE "-fsanitize=address")
 
 add_executable(test_multi test/test_multi.cpp)
-target_link_libraries(test_multi PUBLIC ymc_queue)
+target_link_libraries(test_multi PUBLIC ymcqueue)
 #target_compile_options(test_multi PRIVATE "-fsanitize=address")
 #target_link_options(test_multi PRIVATE "-fsanitize=address")
 

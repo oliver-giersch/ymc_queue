@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
 
-#include "queue.hpp"
+#include "ymcqueue/queue.hpp"
 
 int main() {
   const auto count = 10 * 1000;
