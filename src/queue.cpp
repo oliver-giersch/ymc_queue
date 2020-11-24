@@ -132,7 +132,7 @@ erased_queue_t::~erased_queue_t() noexcept {
 
 void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
-  th.hzd_node_id = th.enq_node_id;
+  th.hzd_node_id.store(th.enq_node_id, RLX);
 
   int64_t id = 0;
   bool success = false;
@@ -153,7 +153,7 @@ void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
 
 void* erased_queue_t::dequeue(std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
-  th.hzd_node_id = th.deq_node_id;
+  th.hzd_node_id.store(th.deq_node_id, RLX);
 
   int64_t id = 0;
   void* res = nullptr;
@@ -216,12 +216,12 @@ void erased_queue_t::cleanup(handle_t& th) {
    new_node = update(ph->Ep, ph->hzd_node_id, new_node, old_node);
    new_node = update(ph->Dp, ph->hzd_node_id, new_node, old_node);
 
-   th.handles[i++] = ph;
+   th.peer_handles[i++] = ph;
    ph = ph->next;
  } while (new_node->id > oid && ph != &th);
 
  while (new_node->id > oid && --i >= 0) {
-   new_node = check(th.handles[i]->hzd_node_id, new_node, old_node);
+   new_node = check(th.peer_handles[i]->hzd_node_id, new_node, old_node);
  }
 
  const auto nid = new_node->id;
@@ -260,7 +260,9 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
   enq.val.store(elem, RLX);
   enq.id.store(id, REL);
 
-  auto& tail = th.Ep;
+  // creates a stack local atomic variable, so that find_cell does not alter the
+  // value stored in th.Ep
+  std::atomic<node_t*> tail{ th.Ep.load(RLX) };
   int64_t i;
 
   do {
@@ -393,10 +395,9 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
     return;
   }
 
-  auto& lDp = ph.Dp;
+  const auto lDp = ph.Dp.load(RLX);
   const auto hzd_node_id = ph.hzd_node_id.load(RLX);
-  th.hzd_node_id.store(hzd_node_id, RLX);
-  std::atomic_thread_fence(SEQ_CST);
+  th.hzd_node_id.store(hzd_node_id, SEQ_CST);
   idx = deq.idx.load(RLX);
 
   auto i = id + 1;
@@ -404,7 +405,7 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
   auto new_val = 0;
 
   while (true) {
-    auto& h = lDp;
+    std::atomic<node_t*> h{lDp};
     for (; idx == old_val && new_val == 0; ++i) {
       auto& cell = find_cell(h, th, i);
 
@@ -433,7 +434,8 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
       break;
     }
 
-    auto& cell = find_cell(lDp, th, idx);
+    std::atomic<node_t*> tmp{lDp};
+    auto& cell = find_cell(tmp, th, idx);
     deq_req_t* cd = nullptr;
     if (cell.val.load(RLX) == top_ptr<void>() || cell.deq.compare_exchange_strong(cd, &deq, RLX_CAS) || cd == &deq) {
       deq.idx.compare_exchange_strong(idx, -idx, RLX_CAS);

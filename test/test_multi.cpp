@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "queue.hpp"
-#include "orig.hpp"
 
 int main() {
   const auto thread_count = 8;
@@ -28,7 +27,7 @@ int main() {
   std::atomic_bool start{ false };
   std::atomic_uint64_t sum{ 0 };
 
-  ymc_original::queue<int> queue{ thread_count * 2 };
+  ymc::queue<int> queue{ thread_count * 2 };
 
   for (auto thread = 0; thread < thread_count; ++thread) {
     // producer thread

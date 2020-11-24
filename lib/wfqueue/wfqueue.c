@@ -361,7 +361,8 @@ static void help_deq(queue_t *q, handle_t *th, handle_t *ph) {
 
   if (idx < id) return;
 
-  node_t *Dp = ph->Dp;
+  // typeof Dp = volatile node_t*
+  node_t *Dp = ph->Dp; // <- copies (loads) the volatile pointer!!
   th->hzd_node_id = ph->hzd_node_id;
   FENCE();
   idx = deq->idx;
@@ -390,7 +391,7 @@ static void help_deq(queue_t *q, handle_t *th, handle_t *ph) {
 
     if (idx < 0 || deq->id != id) break;
 
-    cell_t *c = find_cell(&Dp, idx, th);
+    cell_t *c = find_cell(&Dp, idx, th); // <- likewise only modifies the stack local variable
     deq_t *cd = NULLPTR;
     if (c->val == TOP || CAS(&c->deq, &cd, deq) || cd == deq) {
       CAS(&deq->idx, &idx, -idx);

@@ -14,6 +14,7 @@ extern "C" {
 
 namespace ymc_original {
 template <typename T>
+/** A templated wrapper for the original YMC queue C implementation by Yang. */
 class queue {
 public:
   using pointer = T*;
@@ -53,7 +54,20 @@ public:
     }
   }
 
-  ~queue() noexcept = default;
+  ~queue() noexcept {
+    // delete all remaining nodes in the queue
+    auto curr = this->m_queue.Hp;
+    while (curr != nullptr) {
+      auto tmp = curr;
+      curr = curr->next;
+      delete tmp;
+    }
+
+    // delete any remaining thread-local spare nodes
+    for (auto& handle : this->m_handles) {
+      delete handle.spare;
+    }
+  }
 
   queue(const queue&)                  = delete;
   queue(queue&&)                       = delete;

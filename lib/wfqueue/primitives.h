@@ -67,4 +67,10 @@
  */
 #define ACQUIRE(ptr) __atomic_load_n(ptr, __ATOMIC_ACQUIRE)
 
+#if defined(__x86_64__) || defined(_M_X64_)
+#define PAUSE() __asm__ ("pause")
+#else
+#define PAUSE()
+#endif
+
 #endif /* end of include guard: PRIMITIVES_H */
