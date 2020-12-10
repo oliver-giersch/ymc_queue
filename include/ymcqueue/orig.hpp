@@ -3,13 +3,12 @@
 
 #include <vector>
 
-//#include "private/queue_private.hpp"
 #include "wfqueue.h"
 
 extern "C" {
-  struct _node_t* new_node();
-  void enqueue(queue_t* q, handle_t* th, void* v);
-  void* dequeue(queue_t* q, handle_t* th);
+  struct wfq_node_t* new_node();
+  void enqueue(wfq_queue_t* q, wfq_handle_t* th, void* v);
+  void* dequeue(wfq_queue_t* q, wfq_handle_t* th);
 };
 
 namespace ymc_original {
@@ -27,7 +26,7 @@ public:
     this->m_queue.Hp = node;
 
     for (auto i = 0; i < max_threads; ++i) {
-      this->m_handles.push_back(_handle_t {
+      this->m_handles.push_back(wfq_handle_t {
         nullptr,            // next
         (long unsigned) -1, // hzd_node_id
         node,               // Ep
@@ -40,15 +39,14 @@ public:
         0,                  // Ei
         nullptr,            // Dh
         new_node(),         // spare
-        0,                  // delay
       });
     }
 
     for (auto i = 0; auto& handle : this->m_handles) {
       auto next = i == max_threads - 1 ? &this->m_handles[0] : &this->m_handles[i + 1];
       handle.next = next;
-      handle.Eh = next;
-      handle.Dh = next;
+      handle.enq_help_handle = next;
+      handle.deq_help_handle = next;
 
       i += 1;
     }
@@ -85,8 +83,8 @@ public:
   }
 
 private:
-  queue_t m_queue;
-  std::vector<handle_t> m_handles{};
+  wfq_queue_t m_queue;
+  std::vector<wfq_handle_t> m_handles{};
 };
 }
 

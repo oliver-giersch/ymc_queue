@@ -9,8 +9,8 @@
 namespace ymc::detail {
 struct alignas(64) cell_t {
   std::atomic<void*> val{ nullptr };
-  std::atomic<enq_req_t*> enq{ nullptr };
-  std::atomic<deq_req_t*> deq{ nullptr };
+  std::atomic<enq_req_t*> enq_req{ nullptr };
+  std::atomic<deq_req_t*> deq_req{ nullptr };
 };
 
 struct node_t {

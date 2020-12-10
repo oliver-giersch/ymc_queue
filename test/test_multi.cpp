@@ -6,8 +6,8 @@
 #include "ymcqueue/queue.hpp"
 
 int main() {
-  const auto thread_count = 8;
-  const auto count = 10 * 1000;
+  const uint64_t thread_count = 8;
+  const uint64_t count = 100 * 1000;
 
   std::vector<std::vector<int>> thread_elements{};
   thread_elements.reserve(thread_count);
@@ -42,10 +42,10 @@ int main() {
     // consumer thread
     const auto deq_id = thread + thread_count;
     threads.emplace_back([&, deq_id] {
-      while (!start.load()) {}
+      uint64_t thread_sum = 0;
+      uint64_t  deq_count = 0;
 
-      auto thread_sum = 0;
-      auto deq_count = 0;
+      while (!start.load()) {}
 
       while (deq_count < count) {
         const auto res = queue.dequeue(deq_id);

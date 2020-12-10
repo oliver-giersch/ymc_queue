@@ -1,20 +1,25 @@
-#include <stdexcept>
-
 #include "private/queue_private.hpp"
 
-#include "private/ordering.hpp"
+#include <atomic>
+#include <stdexcept>
+
+//#include "private/ordering.hpp"
 
 namespace ymc::detail {
+constexpr auto RELAXED = std::memory_order_relaxed;
+constexpr auto ACQUIRE = std::memory_order_acquire;
+constexpr auto RELEASE = std::memory_order_release;
+constexpr auto SEQ_CST = std::memory_order_seq_cst;
+
+struct find_cell_result_t {
+  cell_t& cell;
+  node_t& curr;
+};
+
 template<typename T>
 constexpr T* top_ptr() {
   return reinterpret_cast<T*>(std::numeric_limits<size_t>::max());
 }
-
-/*void* spin(std::atomic<void*>& ptr) {
-  for (auto spin = 0; spin < 100; ++spin) {
-
-  }
-}*/
 
 /** Check ... */
 node_t* check(
@@ -22,7 +27,7 @@ node_t* check(
     node_t* curr,
     node_t* old
 ) {
-  const auto hzd_node_id = peer_hzd_node_id.load(ACQ);
+  const auto hzd_node_id = peer_hzd_node_id.load(ACQUIRE);
 
   if (hzd_node_id < curr->id) {
     auto tmp = old;
@@ -42,10 +47,10 @@ node_t* update(
     node_t* curr,
     node_t* old
 ) {
-  auto node = peer_node.load(ACQ);
+  auto node = peer_node.load(ACQUIRE);
 
   if (node->id < curr->id) {
-    if (!peer_node.compare_exchange_strong(node, curr, SEQ_CST_CAS)) {
+    if (!peer_node.compare_exchange_strong(node, curr, SEQ_CST, SEQ_CST)) {
       if (node->id < curr->id) {
         curr = node;
       }
@@ -58,33 +63,36 @@ node_t* update(
 }
 
 /** Does what? */
-cell_t& find_cell(std::atomic<node_t*>& ptr, handle_t& th, int64_t i) {
-  auto curr = ptr.load(RLX);
+find_cell_result_t find_cell(
+    const std::atomic<node_t*>& ptr,
+    handle_t& th,
+    int64_t i
+) {
+  auto curr = ptr.load(RELAXED);
 
   for (auto j = curr->id; j < i / NODE_SIZE; ++j) {
-    auto next = curr->next.load(RLX);
+    auto next = curr->next.load(RELAXED);
 
     if (next == nullptr) {
-      auto tmp = th.spare;
+      auto tmp = th.spare_node;
 
       if (tmp == nullptr) {
         tmp = new node_t();
-        th.spare = tmp;
+        th.spare_node = tmp;
       }
 
       tmp->id = j + 1;
 
-      if (curr->next.compare_exchange_strong(next, tmp, REL_ACQ_CAS)) {
+      if (curr->next.compare_exchange_strong(next, tmp, RELEASE, ACQUIRE)) {
         next = tmp;
-        th.spare = nullptr;
+        th.spare_node = nullptr;
       }
     }
 
     curr = next;
   }
 
-  ptr.store(curr, RLX);
-  return curr->cells[i % NODE_SIZE];
+  return { curr->cells[i % NODE_SIZE], *curr };
 }
 
 /********** constructor & destructor ******************************************/
@@ -97,17 +105,19 @@ erased_queue_t::erased_queue_t(size_t max_threads):
   }
 
   auto node = new node_t();
-  this->Hp.store(node, RLX);
+  this->m_head.store(node, RELAXED);
 
   for (auto i = 0; i < max_threads; ++i) {
     this->m_handles.emplace_back(i, node, max_threads);
   }
 
   for (auto i = 0; auto& handle : this->m_handles) {
-    auto next = i == max_threads - 1 ? &this->m_handles[0] : &this->m_handles[i + 1];
+    auto next = i == max_threads - 1
+        ? &this->m_handles[0]
+        : &this->m_handles[i + 1];
     handle.next = next;
-    handle.Eh = next;
-    handle.Dh = next;
+    handle.enq_help_handle = next;
+    handle.deq_help_handle = next;
 
     i += 1;
   }
@@ -115,16 +125,16 @@ erased_queue_t::erased_queue_t(size_t max_threads):
 
 erased_queue_t::~erased_queue_t() noexcept {
   // delete all remaining nodes in the queue
-  auto curr = this->Hp.load(RLX);
+  auto curr = this->m_head.load(RELAXED);
   while (curr != nullptr) {
     auto tmp = curr;
-    curr = curr->next.load(RLX);
+    curr = curr->next.load(RELAXED);
     delete tmp;
   }
 
   // delete any remaining thread-local spare nodes
   for (auto& handle : this->m_handles) {
-    delete handle.spare;
+    delete handle.spare_node;
   }
 }
 
@@ -132,7 +142,7 @@ erased_queue_t::~erased_queue_t() noexcept {
 
 void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
-  th.hzd_node_id.store(th.enq_node_id, RLX);
+  th.hzd_node_id.store(th.tail_node_id, RELAXED);
 
   int64_t id = 0;
   bool success = false;
@@ -147,13 +157,13 @@ void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
     this->enq_slow(elem, th, id);
   }
 
-  th.enq_node_id = th.Ep.load(RLX)->id;
-  th.hzd_node_id.store(MAX_U64, REL);
+  th.tail_node_id = th.tail.load(RELAXED)->id;
+  th.hzd_node_id.store(MAX_U64, RELEASE);
 }
 
 void* erased_queue_t::dequeue(std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
-  th.hzd_node_id.store(th.deq_node_id, RLX);
+  th.hzd_node_id.store(th.head_node_id, RELAXED);
 
   int64_t id = 0;
   void* res = nullptr;
@@ -169,16 +179,16 @@ void* erased_queue_t::dequeue(std::size_t thread_id) {
   }
 
   if (res != nullptr) {
-    this->help_deq(th, *th.Dh);
-    th.Dh = th.Dh->next;
+    this->help_deq(th, *th.deq_help_handle);
+    th.deq_help_handle = th.deq_help_handle->next;
   }
 
-  th.deq_node_id = th.Dp.load(RLX)->id;
-  th.hzd_node_id.store(MAX_U64, REL);
+  th.head_node_id = th.head.load(RELAXED)->id;
+  th.hzd_node_id.store(MAX_U64, RELEASE);
 
-  if (th.spare == nullptr) {
+  if (th.spare_node == nullptr) {
     this->cleanup(th);
-    th.spare = new node_t();
+    th.spare_node = new node_t();
   }
 
   return res;
@@ -187,8 +197,8 @@ void* erased_queue_t::dequeue(std::size_t thread_id) {
 /********** private methods ***************************************************/
 
 void erased_queue_t::cleanup(handle_t& th) {
- auto oid = this->Hi.load(ACQ);
- auto new_node = th.Dp.load(RLX);
+ auto oid = this->m_help_idx.load(ACQUIRE);
+ auto new_node = th.head.load(RELAXED);
 
  if (oid == -1) {
    return;
@@ -198,23 +208,29 @@ void erased_queue_t::cleanup(handle_t& th) {
    return;
  }
 
- if (!this->Hi.compare_exchange_strong(oid, -1, ACQ_CAS)) {
+ if (
+     !this->m_help_idx.compare_exchange_strong(oid, -1, ACQUIRE, RELAXED)
+ ) {
    return;
  }
 
- auto lDi = this->Di.load(RLX);
- auto lEi = this->Ei.load(RLX);
+ auto lDi = this->m_deq_idx.load(RELAXED);
+ auto lEi = this->m_enq_idx.load(RELAXED);
 
- while (lEi <= lDi && !this->Ei.compare_exchange_weak(lEi, lDi + 1, RLX_CAS)) {}
+ while (
+     lEi <= lDi &&
+     !this->m_enq_idx.compare_exchange_weak(
+         lEi, lDi + 1, RELAXED, RELAXED)
+ ) {}
 
- auto old_node = this->Hp.load(RLX);
+ auto old_node = this->m_head.load(RELAXED);
  auto ph = &th;
  auto i = 0;
 
  do {
    new_node = check(ph->hzd_node_id, new_node, old_node);
-   new_node = update(ph->Ep, ph->hzd_node_id, new_node, old_node);
-   new_node = update(ph->Dp, ph->hzd_node_id, new_node, old_node);
+   new_node = update(ph->tail, ph->hzd_node_id, new_node, old_node);
+   new_node = update(ph->head, ph->hzd_node_id, new_node, old_node);
 
    th.peer_handles[i++] = ph;
    ph = ph->next;
@@ -227,13 +243,13 @@ void erased_queue_t::cleanup(handle_t& th) {
  const auto nid = new_node->id;
 
   if (nid <= oid) {
-    this->Hi.store(oid, REL);
+    this->m_help_idx.store(oid, RELEASE);
   } else {
-    this->Hp.store(new_node, RLX);
-    this->Hi.store(nid, REL);
+    this->m_head.store(new_node, RELAXED);
+    this->m_help_idx.store(nid, RELEASE);
 
     while (old_node != new_node) {
-      auto tmp = old_node->next.load(RLX);
+      auto tmp = old_node->next.load(RELAXED);
       delete old_node;
       old_node = tmp;
     }
@@ -243,11 +259,13 @@ void erased_queue_t::cleanup(handle_t& th) {
 /********** private methods (enqueue) *****************************************/
 
 bool erased_queue_t::enq_fast(void* elem, handle_t& th, int64_t& id) {
-  const auto i = this->Ei.fetch_add(1, SEQ_CST);
-  auto& cell = find_cell(th.Ep, th, i);
+  const auto i = this->m_enq_idx.fetch_add(1, SEQ_CST);
+  auto [cell, curr] = find_cell(th.tail, th, i);
+  th.tail.store(&curr, RELAXED);
+
   void* cell_val = nullptr;
 
-  if (cell.val.compare_exchange_strong(cell_val, elem, RLX_CAS)) {
+  if (cell.val.compare_exchange_strong(cell_val, elem, RELAXED, RELAXED)) {
     return true;
   } else {
     id = i;
@@ -256,107 +274,132 @@ bool erased_queue_t::enq_fast(void* elem, handle_t& th, int64_t& id) {
 }
 
 void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
-  auto& enq = th.Er;
-  enq.val.store(elem, RLX);
-  enq.id.store(id, REL);
+  auto& enq = th.enq_req;
+  enq.val.store(elem, RELAXED);
+  enq.id.store(id, RELEASE);
 
-  // creates a stack local atomic variable, so that find_cell does not alter the
-  // value stored in th.Ep
-  std::atomic<node_t*> tail{ th.Ep.load(RLX) };
   int64_t i;
-
   do {
-    i = this->Ei.fetch_add(1, RLX);
-    auto& cell = find_cell(tail, th, i);
+    i = this->m_enq_idx.fetch_add(1, RELAXED);
+    auto [cell, _ignore] = find_cell(th.tail, th, i);
 
     enq_req_t* expected = nullptr;
-    if (cell.enq.compare_exchange_strong(expected, &enq, SEQ_CST_CAS) && cell.val.load(RLX) != top_ptr<enq_req_t>()) {
-      if (enq.id.compare_exchange_strong(id, -i, RLX_CAS)) {
+    if (
+        cell.enq_req.compare_exchange_strong(
+            expected, &enq, SEQ_CST, SEQ_CST) &&
+        cell.val.load(RELAXED) != top_ptr<enq_req_t>()
+    ) {
+      if (enq.id.compare_exchange_strong(id, -i, RELAXED, RELAXED)) {
         id = -i;
       }
 
       break;
     }
-  } while (enq.id.load(RLX) > 0);
+  } while (enq.id.load(RELAXED) > 0);
 
-  id = -enq.id.load(RLX);
-  auto& cell = find_cell(th.Ep, th, id);
+  id = -enq.id.load(RELAXED);
+  auto [cell, curr] = find_cell(th.tail, th, id);
+  th.tail.store(&curr, RELAXED);
+
   if (id > i) {
-    auto lEi = this->Ei.load(RLX);
-    while (lEi <= id && !this->Ei.compare_exchange_weak(lEi, id + 1, RLX_CAS)) {}
+    auto lEi = this->m_enq_idx.load(RELAXED);
+    while (
+        lEi <= id &&
+        !this->m_enq_idx.compare_exchange_weak(
+            lEi, id + 1, RELAXED, RELAXED)
+    ) {}
   }
 
-  cell.val.store(elem, RLX);
+  cell.val.store(elem, RELAXED);
 }
 
 void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
-  auto res = cell.val.load(ACQ);
+  auto res = cell.val.load(ACQUIRE);
 
   if (res != top_ptr<void>() && res != nullptr) {
     return res;
   }
 
-  if (res == nullptr && !cell.val.compare_exchange_strong(res, top_ptr<void>(), SEQ_CST_CAS)) {
+  if (
+      res == nullptr &&
+      !cell.val.compare_exchange_strong(
+          res, top_ptr<void>(), SEQ_CST, SEQ_CST)
+  ) {
     if (res != top_ptr<void>()) {
       return res;
     }
   }
 
-  auto enq = cell.enq.load(RLX);
+  auto enq = cell.enq_req.load(RELAXED);
 
   if (enq == nullptr) {
-    auto ph = th.Eh;
-    auto pe = &ph->Er;
-    auto id = pe->id.load(RLX);
+    auto ph = th.enq_help_handle;
+    auto pe = &ph->enq_req;
+    auto id = pe->id.load(RELAXED);
 
     if (th.Ei != 0 && th.Ei != id) {
       th.Ei = 0;
-      th.Eh = ph->next;
-      ph = th.Eh;
-      pe = &ph->Er;
+      th.enq_help_handle = ph->next;
+      ph = th.enq_help_handle;
+      pe = &ph->enq_req;
       id = pe->id;
     }
 
-    if (id > 0 && id <= i && !cell.enq.compare_exchange_strong(enq, pe, RLX_CAS) && enq != pe) {
+    if (
+        id > 0 && id <= i &&
+        !cell.enq_req.compare_exchange_strong(enq, pe, RELAXED, RELAXED) &&
+        enq != pe
+    ) {
       th.Ei = id;
     } else {
       th.Ei = 0;
-      th.Eh = ph->next;
+      th.enq_help_handle = ph->next;
     }
 
-    if (enq == nullptr && cell.enq.compare_exchange_strong(enq, top_ptr<enq_req_t>(), RLX_CAS)) {
+    if (
+        enq == nullptr &&
+        cell.enq_req.compare_exchange_strong(
+            enq, top_ptr<enq_req_t>(), RELAXED, RELAXED)
+    ) {
       enq = top_ptr<enq_req_t>();
     }
   }
 
   if (enq == top_ptr<enq_req_t>()) {
-    return (this->Ei.load(RLX) <= i ? nullptr : top_ptr<void>());
+    return (this->m_enq_idx.load(RELAXED) <= i ? nullptr : top_ptr<void>());
   }
 
-  auto enq_id = enq->id.load(ACQ);
-  const auto enq_val = enq->val.load(ACQ);
+  auto enq_id = enq->id.load(ACQUIRE);
+  const auto enq_val = enq->val.load(ACQUIRE);
 
   if (enq_id > i) {
-    if (cell.val.load(RLX) == top_ptr<void>() && this->Ei.load(RLX) <= i) {
+    if (
+        cell.val.load(RELAXED) == top_ptr<void>() &&
+        this->m_enq_idx.load(RELAXED) <= i
+    ) {
       return nullptr;
     }
   } else {
-    if ((enq_id > 0 && enq->id.compare_exchange_strong(enq_id, -i, RLX_CAS)) || (enq_id == -i && cell.val.load(RLX) == top_ptr<void>())) {
-      auto lEi = this->Ei.load(RLX);
-      while (lEi <= i && !this->Ei.compare_exchange_strong(lEi, i + 1, RLX_CAS)) {}
-      cell.val.store(enq_val, RLX);
+    if (
+        (enq_id > 0 && enq->id.compare_exchange_strong(enq_id, -i, RELAXED, RELAXED)) ||
+        (enq_id == -i && cell.val.load(RELAXED) == top_ptr<void>())
+    ) {
+      auto lEi = this->m_enq_idx.load(RELAXED);
+      while (lEi <= i && !this->m_enq_idx.compare_exchange_strong(lEi, i + 1, RELAXED, RELAXED)) {}
+      cell.val.store(enq_val, RELAXED);
     }
   }
 
-  return cell.val.load(RLX);
+  return cell.val.load(RELAXED);
 }
 
 /********** private methods (dequeue) *****************************************/
 
 void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
   // increment dequeue index
-  const auto i = this->Di.fetch_add(1, SEQ_CST);
-  auto& cell = find_cell(th.Dp, th, i);
+  const auto i = this->m_deq_idx.fetch_add(1, SEQ_CST);
+  auto [cell, curr] = find_cell(th.head, th, i);
+  th.head.store(&curr, RELAXED);
   void* res = this->help_enq(cell, th, i);
   deq_req_t* cd = nullptr;
 
@@ -364,7 +407,10 @@ void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
     return nullptr;
   }
 
-  if (res != top_ptr<void>() && cell.deq.compare_exchange_strong(cd, top_ptr<deq_req_t>(), RLX_CAS)) {
+  if (
+      res != top_ptr<void>() &&
+      cell.deq_req.compare_exchange_strong(cd, top_ptr<deq_req_t>(), RELAXED, RELAXED)
+  ) {
     return res;
   }
 
@@ -373,55 +419,55 @@ void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
 }
 
 void* erased_queue_t::deq_slow(handle_t& th, int64_t id) {
-  auto& deq = th.Dr;
-  deq.id.store(id, REL);
-  deq.idx.store(id, REL);
+  auto& deq = th.deq_req;
+  deq.id.store(id, RELEASE);
+  deq.idx.store(id, RELEASE);
 
   this->help_deq(th, th);
 
-  const auto i = -1 * deq.idx.load(RLX);
-  auto& cell = find_cell(th.Dp, th, i);
-  auto res = cell.val.load(RLX);
+  const auto i = -1 * deq.idx.load(RELAXED);
+  auto [cell, curr] = find_cell(th.head, th, i);
+  th.head.store(&curr, RELAXED);
+  auto res = cell.val.load(RELAXED);
 
   return res == top_ptr<void>() ? nullptr : res;
 }
 
 void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
-  auto& deq = ph.Dr;
-  auto idx = deq.idx.load(ACQ);
-  const auto id = deq.id.load(RLX);
+  auto& deq = ph.deq_req;
+  auto idx = deq.idx.load(ACQUIRE);
+  const auto id = deq.id.load(RELAXED);
 
   if (idx < id) {
     return;
   }
 
-  const auto lDp = ph.Dp.load(RLX);
-  const auto hzd_node_id = ph.hzd_node_id.load(RLX);
+  const auto lDp = ph.head.load(RELAXED);
+  const auto hzd_node_id = ph.hzd_node_id.load(RELAXED);
   th.hzd_node_id.store(hzd_node_id, SEQ_CST);
-  idx = deq.idx.load(RLX);
+  idx = deq.idx.load(RELAXED);
 
   auto i = id + 1;
   auto old_val = id;
   auto new_val = 0;
 
   while (true) {
-    std::atomic<node_t*> h{lDp};
     for (; idx == old_val && new_val == 0; ++i) {
-      auto& cell = find_cell(h, th, i);
+      auto [cell, _ignore] = find_cell(ph.head, th, i);
 
-      auto lDi = this->Di.load(RLX);
-      while (lDi <= i && !this->Di.compare_exchange_weak(lDi, i + 1, RLX_CAS)) {}
+      auto lDi = this->m_deq_idx.load(RELAXED);
+      while (lDi <= i && !this->m_deq_idx.compare_exchange_weak(lDi, i + 1, RELAXED, RELAXED)) {}
 
       auto res = this->help_enq(cell, th, i);
-      if (res == nullptr || (res != top_ptr<void>() && cell.deq.load(RLX) == nullptr)) {
+      if (res == nullptr || (res != top_ptr<void>() && cell.deq_req.load(RELAXED) == nullptr)) {
         new_val = i;
       } else {
-        idx = deq.idx.load(ACQ);
+        idx = deq.idx.load(ACQUIRE);
       }
     }
 
     if (new_val != 0) {
-      if (deq.idx.compare_exchange_strong(idx, new_val, REL_ACQ_CAS)) {
+      if (deq.idx.compare_exchange_strong(idx, new_val, RELEASE, ACQUIRE)) {
         idx = new_val;
       }
 
@@ -430,15 +476,18 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
       }
     }
 
-    if (idx < 0 || deq.id.load(RLX) != id) {
+    if (idx < 0 || deq.id.load(RELAXED) != id) {
       break;
     }
 
-    std::atomic<node_t*> tmp{lDp};
-    auto& cell = find_cell(tmp, th, idx);
+    auto [cell, _ignore] = find_cell(ph.head, th, idx);
     deq_req_t* cd = nullptr;
-    if (cell.val.load(RLX) == top_ptr<void>() || cell.deq.compare_exchange_strong(cd, &deq, RLX_CAS) || cd == &deq) {
-      deq.idx.compare_exchange_strong(idx, -idx, RLX_CAS);
+    if (
+        cell.val.load(RELAXED) == top_ptr<void>() ||
+        cell.deq_req.compare_exchange_strong(cd, &deq, RELAXED, RELAXED) ||
+        cd == &deq
+    ) {
+      deq.idx.compare_exchange_strong(idx, -idx, RELAXED, RELAXED);
       break;
     }
 

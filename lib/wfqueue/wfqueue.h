@@ -2,132 +2,69 @@
 #define WFQUEUE_H
 
 #include "align.h"
+
 #define EMPTY ((void *) 0)
 
-#ifndef WFQUEUE_NODE_SIZE
-#define WFQUEUE_NODE_SIZE ((1 << 10) - 2)
-#endif
+#define WFQUEUE_NODE_SIZE (((size_t) 1 << (size_t) 10) - 2)
 
-struct _enq_t {
+struct wfq_enq_t {
   long volatile id;
   void * volatile val;
 } CACHE_ALIGNED;
 
-struct _deq_t {
+struct wfq_deq_t {
   long volatile id;
   long volatile idx;
 } CACHE_ALIGNED;
 
-struct _cell_t {
+struct wfq_cell_t {
   void * volatile val;
-  struct _enq_t * volatile enq;
-  struct _deq_t * volatile deq;
+  struct wfq_enq_t * volatile enq;
+  struct wfq_deq_t * volatile deq;
   void * pad[5];
 };
 
-struct _node_t {
-  struct _node_t * volatile next CACHE_ALIGNED;
+struct wfq_node_t {
+  struct wfq_node_t * volatile next CACHE_ALIGNED;
   long id CACHE_ALIGNED;
-  struct _cell_t cells[WFQUEUE_NODE_SIZE] CACHE_ALIGNED;
+  struct wfq_cell_t cells[WFQUEUE_NODE_SIZE] CACHE_ALIGNED;
 };
 
-typedef struct DOUBLE_CACHE_ALIGNED {
-  /**
-   * Index of the next position for enqueue.
-   */
+struct DOUBLE_CACHE_ALIGNED wfq_queue_t {
+  /** Index of the next position for enqueue. */
   volatile long Ei DOUBLE_CACHE_ALIGNED;
-
-  /**
-   * Index of the next position for dequeue.
-   */
+  /** Index of the next position for dequeue. */
   volatile long Di DOUBLE_CACHE_ALIGNED;
-
-  /**
-   * Index of the head of the queue.
-   */
+  /** Index of the head of the queue. */
   volatile long Hi DOUBLE_CACHE_ALIGNED;
-
-  /**
-   * Pointer to the head node of the queue.
-   */
-  struct _node_t * volatile Hp;
-
-  /**
-   * Number of processors.
-   */
+  /** Pointer to the head node of the queue. */
+  struct wfq_node_t * volatile Hp;
+  /** Number of processors. */
   long nprocs;
-#ifdef RECORD
-  long slowenq;
-  long slowdeq;
-  long fastenq;
-  long fastdeq;
-  long empty;
-#endif
-} queue_t;
+};
 
-typedef struct _handle_t {
-  /**
-   * Pointer to the next handle.
-   */
-  struct _handle_t * next;
-
-  /**
-   * Hazard pointer.
-   */
-  //struct _node_t * volatile Hp;
+struct wfq_handle_t {
+  /** Pointer to the next handle. */
+  struct wfq_handle_t * next;
+  /** Hazard pointer. */
   unsigned long volatile hzd_node_id;
-
-  /**
-   * Pointer to the node for enqueue.
-   */
-  struct _node_t * volatile Ep;
+  /** Pointer to the node for enqueue. */
+  struct wfq_node_t * volatile Ep;
   unsigned long enq_node_id;
-
-  /**
-   * Pointer to the node for dequeue.
-   */
-  struct _node_t * volatile Dp;
+  /** Pointer to the node for dequeue. */
+  struct wfq_node_t * volatile Dp;
   unsigned long deq_node_id;
-
-  /**
-   * Enqueue request.
-   */
-  struct _enq_t Er CACHE_ALIGNED;
-
-  /**
-   * Dequeue request.
-   */
-  struct _deq_t Dr CACHE_ALIGNED;
-
-  /**
-   * Handle of the next enqueuer to help.
-   */
-  struct _handle_t * Eh CACHE_ALIGNED;
-
+  /** Enqueue request. */
+  struct wfq_enq_t Er CACHE_ALIGNED;
+  /** Dequeue request. */
+  struct wfq_deq_t Dr CACHE_ALIGNED;
+  /** Handle of the next enqueuer to help. */
+  struct wfq_handle_t * Eh CACHE_ALIGNED;
   long Ei;
+  /** Handle of the next dequeuer to help. */
+  struct wfq_handle_t * Dh;
+  /** Pointer to a spare node to use, to speedup adding a new node. */
+  struct wfq_node_t * spare CACHE_ALIGNED;
+};
 
-  /**
-   * Handle of the next dequeuer to help.
-   */
-  struct _handle_t * Dh;
-
-  /**
-   * Pointer to a spare node to use, to speedup adding a new node.
-   */
-  struct _node_t * spare CACHE_ALIGNED;
-
-  /**
-   * Count the delay rounds of helping another dequeuer.
-   */
-  int delay;
-
-#ifdef RECORD
-  long slowenq;
-  long slowdeq;
-  long fastenq;
-  long fastdeq;
-  long empty;
-#endif
-} handle_t;
-
-#endif /* end of include guard: WFQUEUE_H */
+#endif /* WFQUEUE_H */

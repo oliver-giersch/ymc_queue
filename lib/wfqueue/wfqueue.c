@@ -19,10 +19,12 @@
 #define MAX_PATIENCE 10
 #endif
 
-typedef struct _enq_t enq_t;
-typedef struct _deq_t deq_t;
-typedef struct _cell_t cell_t;
-typedef struct _node_t node_t;
+typedef struct wfq_enq_t    enq_t;
+typedef struct wfq_deq_t    deq_t;
+typedef struct wfq_cell_t   cell_t;
+typedef struct wfq_node_t   node_t;
+typedef struct wfq_queue_t  queue_t;
+typedef struct wfq_handle_t handle_t;
 
 static void cleanup(queue_t *q, handle_t *th);
 
@@ -272,8 +274,7 @@ static void enq_slow(queue_t *q, handle_t *th, void *v, long id) {
 }
 
 static void *help_enq(queue_t *q, handle_t *th, cell_t *c, long i) {
-  //void *v = spin(&c->val);
-  void* v = ACQUIRE(&c->val);
+  void *v = spin(&c->val);
 
   if ((v != TOP && v != NULLPTR) ||
       (v == NULLPTR && !CAScs(&c->val, &v, TOP) && v != TOP)) {

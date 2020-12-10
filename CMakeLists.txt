@@ -18,8 +18,8 @@ target_link_options(test_single PRIVATE "-fsanitize=address")
 
 add_executable(test_multi test/test_multi.cpp)
 target_link_libraries(test_multi PUBLIC ymcqueue)
-#target_compile_options(test_multi PRIVATE "-fsanitize=address")
-#target_link_options(test_multi PRIVATE "-fsanitize=address")
+target_compile_options(test_multi PRIVATE "-fsanitize=address,leak")
+target_link_options(test_multi PRIVATE "-fsanitize=address,leak")
 
 target_link_libraries(test_multi PRIVATE
         Threads::Threads

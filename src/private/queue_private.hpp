@@ -38,13 +38,13 @@ private:
   void  help_deq(handle_t& th, handle_t& ph);
 
   /** Index of the next position for enqueue. */
-  alignas(128) std::atomic_int64_t Ei{ 1 };
+  alignas(128) std::atomic_int64_t m_enq_idx{ 1 };
   /** Index of the next position for dequeue. */
-  alignas(128) std::atomic_int64_t Di{ 1 };
+  alignas(128) std::atomic_int64_t m_deq_idx{ 1 };
   /** Index of the head of the queue. */
-  alignas(128) std::atomic_int64_t Hi{ 0 };
+  alignas(128) std::atomic_int64_t m_help_idx{ 0 };
   /** Pointer to the head node of the queue. */
-  std::atomic<node_t*> Hp;
+  std::atomic<node_t*> m_head;
   /** Vector of all thread handles */
   std::deque<handle_t> m_handles;
   std::size_t m_max_threads;
