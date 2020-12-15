@@ -3,13 +3,11 @@
 #include <atomic>
 #include <stdexcept>
 
-//#include "private/ordering.hpp"
-
 namespace ymc::detail {
-constexpr auto RELAXED = std::memory_order_relaxed;
-constexpr auto ACQUIRE = std::memory_order_acquire;
-constexpr auto RELEASE = std::memory_order_release;
-constexpr auto SEQ_CST = std::memory_order_seq_cst;
+constexpr auto relaxed = std::memory_order_relaxed;
+constexpr auto acquire = std::memory_order_acquire;
+constexpr auto release = std::memory_order_release;
+constexpr auto seq_cst = std::memory_order_seq_cst;
 
 struct find_cell_result_t {
   cell_t& cell;
@@ -27,7 +25,7 @@ node_t* check(
     node_t* curr,
     node_t* old
 ) {
-  const auto hzd_node_id = peer_hzd_node_id.load(ACQUIRE);
+  const auto hzd_node_id = peer_hzd_node_id.load(acquire);
 
   if (hzd_node_id < curr->id) {
     auto tmp = old;
@@ -47,10 +45,10 @@ node_t* update(
     node_t* curr,
     node_t* old
 ) {
-  auto node = peer_node.load(ACQUIRE);
+  auto node = peer_node.load(acquire);
 
   if (node->id < curr->id) {
-    if (!peer_node.compare_exchange_strong(node, curr, SEQ_CST, SEQ_CST)) {
+    if (!peer_node.compare_exchange_strong(node, curr, seq_cst, seq_cst)) {
       if (node->id < curr->id) {
         curr = node;
       }
@@ -68,10 +66,10 @@ find_cell_result_t find_cell(
     handle_t& th,
     int64_t i
 ) {
-  auto curr = ptr.load(RELAXED);
+  auto curr = ptr.load(relaxed);
 
   for (auto j = curr->id; j < i / NODE_SIZE; ++j) {
-    auto next = curr->next.load(RELAXED);
+    auto next = curr->next.load(relaxed);
 
     if (next == nullptr) {
       auto tmp = th.spare_node;
@@ -83,7 +81,7 @@ find_cell_result_t find_cell(
 
       tmp->id = j + 1;
 
-      if (curr->next.compare_exchange_strong(next, tmp, RELEASE, ACQUIRE)) {
+      if (curr->next.compare_exchange_strong(next, tmp, release, acquire)) {
         next = tmp;
         th.spare_node = nullptr;
       }
@@ -95,7 +93,7 @@ find_cell_result_t find_cell(
   return { curr->cells[i % NODE_SIZE], *curr };
 }
 
-/********** constructor & destructor ******************************************/
+/********** constructor & destructor **************************************************************/
 
 erased_queue_t::erased_queue_t(size_t max_threads):
   m_handles{}, m_max_threads(max_threads)
@@ -105,7 +103,7 @@ erased_queue_t::erased_queue_t(size_t max_threads):
   }
 
   auto node = new node_t();
-  this->m_head.store(node, RELAXED);
+  this->m_head.store(node, relaxed);
 
   for (auto i = 0; i < max_threads; ++i) {
     this->m_handles.emplace_back(i, node, max_threads);
@@ -125,10 +123,10 @@ erased_queue_t::erased_queue_t(size_t max_threads):
 
 erased_queue_t::~erased_queue_t() noexcept {
   // delete all remaining nodes in the queue
-  auto curr = this->m_head.load(RELAXED);
+  auto curr = this->m_head.load(relaxed);
   while (curr != nullptr) {
     auto tmp = curr;
-    curr = curr->next.load(RELAXED);
+    curr = curr->next.load(relaxed);
     delete tmp;
   }
 
@@ -138,11 +136,11 @@ erased_queue_t::~erased_queue_t() noexcept {
   }
 }
 
-/********** public methods ****************************************************/
+/********** public methods ************************************************************************/
 
 void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
-  th.hzd_node_id.store(th.tail_node_id, RELAXED);
+  th.hzd_node_id.store(th.tail_node_id, relaxed);
 
   int64_t id = 0;
   bool success = false;
@@ -157,13 +155,13 @@ void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
     this->enq_slow(elem, th, id);
   }
 
-  th.tail_node_id = th.tail.load(RELAXED)->id;
-  th.hzd_node_id.store(MAX_U64, RELEASE);
+  th.tail_node_id = th.tail.load(relaxed)->id;
+  th.hzd_node_id.store(MAX_U64, release);
 }
 
 void* erased_queue_t::dequeue(std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
-  th.hzd_node_id.store(th.head_node_id, RELAXED);
+  th.hzd_node_id.store(th.head_node_id, relaxed);
 
   int64_t id = 0;
   void* res = nullptr;
@@ -183,8 +181,8 @@ void* erased_queue_t::dequeue(std::size_t thread_id) {
     th.deq_help_handle = th.deq_help_handle->next;
   }
 
-  th.head_node_id = th.head.load(RELAXED)->id;
-  th.hzd_node_id.store(MAX_U64, RELEASE);
+  th.head_node_id = th.head.load(relaxed)->id;
+  th.hzd_node_id.store(MAX_U64, release);
 
   if (th.spare_node == nullptr) {
     this->cleanup(th);
@@ -194,11 +192,11 @@ void* erased_queue_t::dequeue(std::size_t thread_id) {
   return res;
 }
 
-/********** private methods ***************************************************/
+/********** private methods ***********************************************************************/
 
 void erased_queue_t::cleanup(handle_t& th) {
- auto oid = this->m_help_idx.load(ACQUIRE);
- auto new_node = th.head.load(RELAXED);
+ auto oid = this->m_help_idx.load(acquire);
+ auto new_node = th.head.load(relaxed);
 
  if (oid == -1) {
    return;
@@ -209,21 +207,21 @@ void erased_queue_t::cleanup(handle_t& th) {
  }
 
  if (
-     !this->m_help_idx.compare_exchange_strong(oid, -1, ACQUIRE, RELAXED)
+     !this->m_help_idx.compare_exchange_strong(oid, -1, acquire, relaxed)
  ) {
    return;
  }
 
- auto lDi = this->m_deq_idx.load(RELAXED);
- auto lEi = this->m_enq_idx.load(RELAXED);
+ auto lDi = this->m_deq_idx.load(relaxed);
+ auto lEi = this->m_enq_idx.load(relaxed);
 
  while (
-     lEi <= lDi &&
-     !this->m_enq_idx.compare_exchange_weak(
-         lEi, lDi + 1, RELAXED, RELAXED)
+     lEi <= lDi
+     && !this->m_enq_idx.compare_exchange_weak(
+         lEi, lDi + 1, relaxed, relaxed)
  ) {}
 
- auto old_node = this->m_head.load(RELAXED);
+ auto old_node = this->m_head.load(relaxed);
  auto ph = &th;
  auto i = 0;
 
@@ -243,29 +241,28 @@ void erased_queue_t::cleanup(handle_t& th) {
  const auto nid = new_node->id;
 
   if (nid <= oid) {
-    this->m_help_idx.store(oid, RELEASE);
+    this->m_help_idx.store(oid, release);
   } else {
-    this->m_head.store(new_node, RELAXED);
-    this->m_help_idx.store(nid, RELEASE);
+    this->m_head.store(new_node, relaxed);
+    this->m_help_idx.store(nid, release);
 
     while (old_node != new_node) {
-      auto tmp = old_node->next.load(RELAXED);
+      auto tmp = old_node->next.load(relaxed);
       delete old_node;
       old_node = tmp;
     }
   }
 }
 
-/********** private methods (enqueue) *****************************************/
+/********** private methods (enqueue) *************************************************************/
 
 bool erased_queue_t::enq_fast(void* elem, handle_t& th, int64_t& id) {
-  const auto i = this->m_enq_idx.fetch_add(1, SEQ_CST);
+  const auto i = this->m_enq_idx.fetch_add(1, seq_cst);
   auto [cell, curr] = find_cell(th.tail, th, i);
-  th.tail.store(&curr, RELAXED);
+  th.tail.store(&curr, relaxed);
 
-  void* cell_val = nullptr;
-
-  if (cell.val.compare_exchange_strong(cell_val, elem, RELAXED, RELAXED)) {
+  void* expected = nullptr;
+  if (cell.val.compare_exchange_strong(expected, elem, relaxed, relaxed)) {
     return true;
   } else {
     id = i;
@@ -275,67 +272,66 @@ bool erased_queue_t::enq_fast(void* elem, handle_t& th, int64_t& id) {
 
 void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
   auto& enq = th.enq_req;
-  enq.val.store(elem, RELAXED);
-  enq.id.store(id, RELEASE);
+  enq.val.store(elem, relaxed);
+  enq.id.store(id, release);
 
   int64_t i;
   do {
-    i = this->m_enq_idx.fetch_add(1, RELAXED);
+    i = this->m_enq_idx.fetch_add(1, relaxed);
     auto [cell, _ignore] = find_cell(th.tail, th, i);
 
     enq_req_t* expected = nullptr;
     if (
-        cell.enq_req.compare_exchange_strong(
-            expected, &enq, SEQ_CST, SEQ_CST) &&
-        cell.val.load(RELAXED) != top_ptr<enq_req_t>()
+        cell.enq_req.compare_exchange_strong(expected, &enq, seq_cst, seq_cst)
+        && cell.val.load(relaxed) != top_ptr<enq_req_t>()
     ) {
-      if (enq.id.compare_exchange_strong(id, -i, RELAXED, RELAXED)) {
+      if (enq.id.compare_exchange_strong(id, -i, relaxed, relaxed)) {
         id = -i;
       }
 
       break;
     }
-  } while (enq.id.load(RELAXED) > 0);
+  } while (enq.id.load(relaxed) > 0);
 
-  id = -enq.id.load(RELAXED);
+  id = -enq.id.load(relaxed);
   auto [cell, curr] = find_cell(th.tail, th, id);
-  th.tail.store(&curr, RELAXED);
+  th.tail.store(&curr, relaxed);
 
   if (id > i) {
-    auto lEi = this->m_enq_idx.load(RELAXED);
+    auto lEi = this->m_enq_idx.load(relaxed);
     while (
-        lEi <= id &&
-        !this->m_enq_idx.compare_exchange_weak(
-            lEi, id + 1, RELAXED, RELAXED)
+        lEi <= id
+        && !this->m_enq_idx.compare_exchange_weak(
+            lEi, id + 1, relaxed, relaxed)
     ) {}
   }
 
-  cell.val.store(elem, RELAXED);
+  cell.val.store(elem, relaxed);
 }
 
 void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
-  auto res = cell.val.load(ACQUIRE);
+  auto res = cell.val.load(acquire);
 
   if (res != top_ptr<void>() && res != nullptr) {
     return res;
   }
 
   if (
-      res == nullptr &&
-      !cell.val.compare_exchange_strong(
-          res, top_ptr<void>(), SEQ_CST, SEQ_CST)
+      res == nullptr
+      && !cell.val.compare_exchange_strong(
+          res, top_ptr<void>(), seq_cst, seq_cst)
   ) {
     if (res != top_ptr<void>()) {
       return res;
     }
   }
 
-  auto enq = cell.enq_req.load(RELAXED);
+  auto enq = cell.enq_req.load(relaxed);
 
   if (enq == nullptr) {
     auto ph = th.enq_help_handle;
     auto pe = &ph->enq_req;
-    auto id = pe->id.load(RELAXED);
+    auto id = pe->id.load(relaxed);
 
     if (th.Ei != 0 && th.Ei != id) {
       th.Ei = 0;
@@ -346,9 +342,9 @@ void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
     }
 
     if (
-        id > 0 && id <= i &&
-        !cell.enq_req.compare_exchange_strong(enq, pe, RELAXED, RELAXED) &&
-        enq != pe
+        id > 0 && id <= i
+        && !cell.enq_req.compare_exchange_strong(enq, pe, relaxed, relaxed)
+        && enq != pe
     ) {
       th.Ei = id;
     } else {
@@ -357,49 +353,49 @@ void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
     }
 
     if (
-        enq == nullptr &&
-        cell.enq_req.compare_exchange_strong(
-            enq, top_ptr<enq_req_t>(), RELAXED, RELAXED)
+        enq == nullptr && cell.enq_req.compare_exchange_strong(
+            enq, top_ptr<enq_req_t>(), relaxed, relaxed
+        )
     ) {
       enq = top_ptr<enq_req_t>();
     }
   }
 
   if (enq == top_ptr<enq_req_t>()) {
-    return (this->m_enq_idx.load(RELAXED) <= i ? nullptr : top_ptr<void>());
+    return (this->m_enq_idx.load(relaxed) <= i ? nullptr : top_ptr<void>());
   }
 
-  auto enq_id = enq->id.load(ACQUIRE);
-  const auto enq_val = enq->val.load(ACQUIRE);
+  auto enq_id = enq->id.load(acquire);
+  const auto enq_val = enq->val.load(acquire);
 
   if (enq_id > i) {
     if (
-        cell.val.load(RELAXED) == top_ptr<void>() &&
-        this->m_enq_idx.load(RELAXED) <= i
+        cell.val.load(relaxed) == top_ptr<void>()
+        && this->m_enq_idx.load(relaxed) <= i
     ) {
       return nullptr;
     }
   } else {
     if (
-        (enq_id > 0 && enq->id.compare_exchange_strong(enq_id, -i, RELAXED, RELAXED)) ||
-        (enq_id == -i && cell.val.load(RELAXED) == top_ptr<void>())
+        (enq_id > 0 && enq->id.compare_exchange_strong(enq_id, -i, relaxed, relaxed))
+        || (enq_id == -i && cell.val.load(relaxed) == top_ptr<void>())
     ) {
-      auto lEi = this->m_enq_idx.load(RELAXED);
-      while (lEi <= i && !this->m_enq_idx.compare_exchange_strong(lEi, i + 1, RELAXED, RELAXED)) {}
-      cell.val.store(enq_val, RELAXED);
+      auto lEi = this->m_enq_idx.load(relaxed);
+      while (lEi <= i && !this->m_enq_idx.compare_exchange_strong(lEi, i + 1, relaxed, relaxed)) {}
+      cell.val.store(enq_val, relaxed);
     }
   }
 
-  return cell.val.load(RELAXED);
+  return cell.val.load(relaxed);
 }
 
-/********** private methods (dequeue) *****************************************/
+/********** private methods (dequeue) *************************************************************/
 
 void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
   // increment dequeue index
-  const auto i = this->m_deq_idx.fetch_add(1, SEQ_CST);
+  const auto i = this->m_deq_idx.fetch_add(1, seq_cst);
   auto [cell, curr] = find_cell(th.head, th, i);
-  th.head.store(&curr, RELAXED);
+  th.head.store(&curr, relaxed);
   void* res = this->help_enq(cell, th, i);
   deq_req_t* cd = nullptr;
 
@@ -409,7 +405,7 @@ void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
 
   if (
       res != top_ptr<void>() &&
-      cell.deq_req.compare_exchange_strong(cd, top_ptr<deq_req_t>(), RELAXED, RELAXED)
+      cell.deq_req.compare_exchange_strong(cd, top_ptr<deq_req_t>(), relaxed, relaxed)
   ) {
     return res;
   }
@@ -420,32 +416,32 @@ void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
 
 void* erased_queue_t::deq_slow(handle_t& th, int64_t id) {
   auto& deq = th.deq_req;
-  deq.id.store(id, RELEASE);
-  deq.idx.store(id, RELEASE);
+  deq.id.store(id, release);
+  deq.idx.store(id, release);
 
   this->help_deq(th, th);
 
-  const auto i = -1 * deq.idx.load(RELAXED);
+  const auto i = -1 * deq.idx.load(relaxed);
   auto [cell, curr] = find_cell(th.head, th, i);
-  th.head.store(&curr, RELAXED);
-  auto res = cell.val.load(RELAXED);
+  th.head.store(&curr, relaxed);
+  auto res = cell.val.load(relaxed);
 
   return res == top_ptr<void>() ? nullptr : res;
 }
 
 void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
   auto& deq = ph.deq_req;
-  auto idx = deq.idx.load(ACQUIRE);
-  const auto id = deq.id.load(RELAXED);
+  auto idx = deq.idx.load(acquire);
+  const auto id = deq.id.load(relaxed);
 
   if (idx < id) {
     return;
   }
 
-  const auto lDp = ph.head.load(RELAXED);
-  const auto hzd_node_id = ph.hzd_node_id.load(RELAXED);
-  th.hzd_node_id.store(hzd_node_id, SEQ_CST);
-  idx = deq.idx.load(RELAXED);
+  const auto lDp = ph.head.load(relaxed);
+  const auto hzd_node_id = ph.hzd_node_id.load(relaxed);
+  th.hzd_node_id.store(hzd_node_id, seq_cst);
+  idx = deq.idx.load(relaxed);
 
   auto i = id + 1;
   auto old_val = id;
@@ -455,19 +451,19 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
     for (; idx == old_val && new_val == 0; ++i) {
       auto [cell, _ignore] = find_cell(ph.head, th, i);
 
-      auto lDi = this->m_deq_idx.load(RELAXED);
-      while (lDi <= i && !this->m_deq_idx.compare_exchange_weak(lDi, i + 1, RELAXED, RELAXED)) {}
+      auto lDi = this->m_deq_idx.load(relaxed);
+      while (lDi <= i && !this->m_deq_idx.compare_exchange_weak(lDi, i + 1, relaxed, relaxed)) {}
 
       auto res = this->help_enq(cell, th, i);
-      if (res == nullptr || (res != top_ptr<void>() && cell.deq_req.load(RELAXED) == nullptr)) {
+      if (res == nullptr || (res != top_ptr<void>() && cell.deq_req.load(relaxed) == nullptr)) {
         new_val = i;
       } else {
-        idx = deq.idx.load(ACQUIRE);
+        idx = deq.idx.load(acquire);
       }
     }
 
     if (new_val != 0) {
-      if (deq.idx.compare_exchange_strong(idx, new_val, RELEASE, ACQUIRE)) {
+      if (deq.idx.compare_exchange_strong(idx, new_val, release, acquire)) {
         idx = new_val;
       }
 
@@ -476,18 +472,18 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
       }
     }
 
-    if (idx < 0 || deq.id.load(RELAXED) != id) {
+    if (idx < 0 || deq.id.load(relaxed) != id) {
       break;
     }
 
     auto [cell, _ignore] = find_cell(ph.head, th, idx);
     deq_req_t* cd = nullptr;
     if (
-        cell.val.load(RELAXED) == top_ptr<void>() ||
-        cell.deq_req.compare_exchange_strong(cd, &deq, RELAXED, RELAXED) ||
+        cell.val.load(relaxed) == top_ptr<void>() ||
+        cell.deq_req.compare_exchange_strong(cd, &deq, relaxed, relaxed) ||
         cd == &deq
     ) {
-      deq.idx.compare_exchange_strong(idx, -idx, RELAXED, RELAXED);
+      deq.idx.compare_exchange_strong(idx, -idx, relaxed, relaxed);
       break;
     }
 
