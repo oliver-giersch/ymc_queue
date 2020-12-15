@@ -72,18 +72,18 @@ find_cell_result_t find_cell(
     auto next = curr->next.load(relaxed);
 
     if (next == nullptr) {
-      auto tmp = th.spare_node;
-
-      if (tmp == nullptr) {
-        tmp = new node_t();
-        th.spare_node = tmp;
+      if (th.has_appended_node) {
+        th.has_appended_node = false;
       }
 
-      tmp->id = j + 1;
+      auto node = new node_t();
+      node->id = j + 1;
 
-      if (curr->next.compare_exchange_strong(next, tmp, release, acquire)) {
-        next = tmp;
-        th.spare_node = nullptr;
+      if (curr->next.compare_exchange_strong(next, node, release, acquire)) {
+        next = node;
+        th.has_appended_node = true;
+      } else {
+        delete node;
       }
     }
 
@@ -106,7 +106,7 @@ erased_queue_t::erased_queue_t(size_t max_threads):
   this->m_head.store(node, relaxed);
 
   for (auto i = 0; i < max_threads; ++i) {
-    this->m_handles.emplace_back(i, node, max_threads);
+    this->m_handles.emplace_back(node, max_threads);
   }
 
   for (auto i = 0; auto& handle : this->m_handles) {
@@ -128,11 +128,6 @@ erased_queue_t::~erased_queue_t() noexcept {
     auto tmp = curr;
     curr = curr->next.load(relaxed);
     delete tmp;
-  }
-
-  // delete any remaining thread-local spare nodes
-  for (auto& handle : this->m_handles) {
-    delete handle.spare_node;
   }
 }
 
@@ -184,9 +179,9 @@ void* erased_queue_t::dequeue(std::size_t thread_id) {
   th.head_node_id = th.head.load(relaxed)->id;
   th.hzd_node_id.store(MAX_U64, release);
 
-  if (th.spare_node == nullptr) {
+  if (th.has_appended_node) {
     this->cleanup(th);
-    th.spare_node = new node_t();
+    th.has_appended_node = false;
   }
 
   return res;
@@ -438,7 +433,6 @@ void erased_queue_t::help_deq(handle_t& th, handle_t& ph) {
     return;
   }
 
-  const auto lDp = ph.head.load(relaxed);
   const auto hzd_node_id = ph.hzd_node_id.load(relaxed);
   th.hzd_node_id.store(hzd_node_id, seq_cst);
   idx = deq.idx.load(relaxed);
