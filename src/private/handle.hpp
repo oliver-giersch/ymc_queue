@@ -12,14 +12,16 @@ namespace ymc::detail {
 constexpr auto MAX_U64 = std::numeric_limits<uint64_t>::max();
 struct handle_t {
   /** constructor */
-  handle_t(node_t* node, size_t max_threads):
-      tail{ node }, head{ node }, peer_handles{ max_threads }
+  handle_t(size_t thread_id, node_t* node, size_t max_threads):
+      thread_id{ thread_id }, tail{ node }, head{ node }, peer_handles{ max_threads }
   {
     for (auto i = 0; i < max_threads; ++i) {
       this->peer_handles.push_back(nullptr);
     }
   }
 
+  /** Thread handle id. */
+  std::size_t thread_id;
   /** Pointer to the next handle. */
   handle_t* next{ nullptr };
   /** Hazard pointer. */
@@ -39,9 +41,10 @@ struct handle_t {
   int64_t Ei{ 0 };
   /** Handle of the next dequeue to help. */
   handle_t* deq_help_handle{ nullptr };
+  /** Pointer to a spare node to use, to speedup adding a new node. */
+  node_t* spare_node{ new node_t() };
   /** Storage for temporary thread handles during cleanup. */
   std::vector<handle_t*> peer_handles;
-  bool has_appended_node{ false };
 };
 }
 
