@@ -7,7 +7,7 @@ add_subdirectory(lib/wfqueue)
 
 find_package(Threads REQUIRED)
 
-add_library(ymcqueue src/queue.cpp)
+add_library(ymcqueue src/erased_queue.cpp)
 target_include_directories(ymcqueue PUBLIC include/ src/)
 target_link_libraries(ymcqueue PUBLIC wfqueue)
 

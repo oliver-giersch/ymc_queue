@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
 
-#include "ymcqueue/queue.hpp"
+#include "ymcqueue/erased_queue.hpp"
 
 int main() {
   const auto count = 10 * 1000;

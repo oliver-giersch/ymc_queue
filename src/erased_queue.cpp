@@ -1,4 +1,4 @@
-#include "private/queue_private.hpp"
+#include "private/erased_queue.hpp"
 
 #include <atomic>
 #include <stdexcept>
@@ -16,19 +16,21 @@ struct find_cell_result_t {
 
 template<typename T>
 constexpr T* top_ptr() {
-  return reinterpret_cast<T*>(std::numeric_limits<size_t>::max());
+  return reinterpret_cast<T*>(std::numeric_limits<std::uintmax_t>::max());
 }
 
-/** Check ... */
+/** Check the given peer's current hazard node id and return the matching node pointer. */
 node_t* check(
-    const std::atomic<uint64_t>& peer_hzd_node_id,
+    const std::atomic_uintmax_t& peer_hzd_node_id,
     node_t* curr,
     node_t* old
 ) {
+  // read the peer's current hazard node id
   const auto hzd_node_id = peer_hzd_node_id.load(acquire);
-
+  // the peer's hazard id lags behind the current node
   if (hzd_node_id < curr->id) {
     auto tmp = old;
+    // advance curr until the first node protected by the peer
     while (tmp->id < hzd_node_id) {
       tmp = tmp->next;
     }
@@ -38,15 +40,16 @@ node_t* check(
   return curr;
 }
 
-/** ??? */
+/** Advances a peer thread's head/tail pointer */
 node_t* update(
     std::atomic<node_t*>& peer_node,
-    const std::atomic<uint64_t>& peer_hzd_node_id,
+    const std::atomic_uintmax_t& peer_hzd_node_id,
     node_t* curr,
     node_t* old
 ) {
+  // check the peer's current node pointer
   auto node = peer_node.load(acquire);
-
+  // if the peer is lagging behind, update the pointer
   if (node->id < curr->id) {
     if (!peer_node.compare_exchange_strong(node, curr, seq_cst, seq_cst)) {
       if (node->id < curr->id) {
@@ -60,53 +63,54 @@ node_t* update(
   return curr;
 }
 
-/** Does what? */
+/** Searches for the node & cell matching the given idx value. */
 find_cell_result_t find_cell(
     const std::atomic<node_t*>& ptr,
-    handle_t& th,
-    int64_t i
+    handle_t& thread_handle,
+    std::intmax_t idx
 ) {
   auto curr = ptr.load(relaxed);
-
-  for (auto j = curr->id; j < i / NODE_SIZE; ++j) {
+  // search the node containing the cell for the idx value
+  for (auto j = curr->id; j < idx / NODE_SIZE; ++j) {
     auto next = curr->next.load(relaxed);
-
+    // if no node for the searched idx exists yet, install a new one
     if (next == nullptr) {
-      auto tmp = th.spare_node;
-
+      auto tmp = thread_handle.spare_node;
+      // use the current spare node if there is one
       if (tmp == nullptr) {
         tmp = new node_t();
-        th.spare_node = tmp;
+        thread_handle.spare_node = tmp;
       }
-
+      // set the appropriate node id
       tmp->id = j + 1;
-
+      // attempt to install it and proceed
       if (curr->next.compare_exchange_strong(next, tmp, release, acquire)) {
         next = tmp;
-        th.spare_node = nullptr;
+        thread_handle.spare_node = nullptr;
       }
     }
 
     curr = next;
   }
-
-  return { curr->cells[i % NODE_SIZE], *curr };
+  // return both the cell and the node pointer (reference)
+  return { curr->cells[idx % NODE_SIZE], *curr };
 }
 
 /********** constructor & destructor **************************************************************/
 
-erased_queue_t::erased_queue_t(size_t max_threads):
-  m_handles{}, m_max_threads(max_threads)
+erased_queue_t::erased_queue_t(std::size_t max_threads):
+  m_handles{ }, m_max_threads{ max_threads }
 {
   if (max_threads == 0) {
     throw std::invalid_argument("max_threads must be at least 1");
   }
 
+  // install empty head node
   auto node = new node_t();
   this->m_head.store(node, relaxed);
 
   for (auto i = 0; i < max_threads; ++i) {
-    this->m_handles.emplace_back(i, node, max_threads);
+    this->m_handles.emplace_back(node, max_threads);
   }
 
   for (auto i = 0; auto& handle : this->m_handles) {
@@ -142,7 +146,7 @@ void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
   th.hzd_node_id.store(th.tail_node_id, relaxed);
 
-  int64_t id = 0;
+  std::intmax_t id = 0;
   bool success = false;
 
   for (auto patience = 0; patience < PATIENCE; ++patience) {
@@ -156,14 +160,14 @@ void erased_queue_t::enqueue(void* elem, std::size_t thread_id) {
   }
 
   th.tail_node_id = th.tail.load(relaxed)->id;
-  th.hzd_node_id.store(MAX_U64, release);
+  th.hzd_node_id.store(NO_HAZARD, release);
 }
 
 void* erased_queue_t::dequeue(std::size_t thread_id) {
   auto& th = this->m_handles[thread_id];
   th.hzd_node_id.store(th.head_node_id, relaxed);
 
-  int64_t id = 0;
+  std::intmax_t id = 0;
   void* res = nullptr;
 
   for (auto patience = 0; patience < PATIENCE; ++patience) {
@@ -182,7 +186,7 @@ void* erased_queue_t::dequeue(std::size_t thread_id) {
   }
 
   th.head_node_id = th.head.load(relaxed)->id;
-  th.hzd_node_id.store(MAX_U64, release);
+  th.hzd_node_id.store(NO_HAZARD, release);
 
   if (th.spare_node == nullptr) {
     this->cleanup(th);
@@ -211,6 +215,8 @@ void erased_queue_t::cleanup(handle_t& th) {
  ) {
    return;
  }
+
+ // from here on only one thread
 
  auto lDi = this->m_deq_idx.load(relaxed);
  auto lEi = this->m_enq_idx.load(relaxed);
@@ -256,10 +262,10 @@ void erased_queue_t::cleanup(handle_t& th) {
 
 /********** private methods (enqueue) *************************************************************/
 
-bool erased_queue_t::enq_fast(void* elem, handle_t& th, int64_t& id) {
+bool erased_queue_t::enq_fast(void* elem, handle_t& thread_handle, std::intmax_t& id) {
   const auto i = this->m_enq_idx.fetch_add(1, seq_cst);
-  auto [cell, curr] = find_cell(th.tail, th, i);
-  th.tail.store(&curr, relaxed);
+  auto [cell, curr] = find_cell(thread_handle.tail, thread_handle, i);
+  thread_handle.tail.store(&curr, relaxed);
 
   void* expected = nullptr;
   if (cell.val.compare_exchange_strong(expected, elem, relaxed, relaxed)) {
@@ -270,15 +276,15 @@ bool erased_queue_t::enq_fast(void* elem, handle_t& th, int64_t& id) {
   }
 }
 
-void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
-  auto& enq = th.enq_req;
+void erased_queue_t::enq_slow(void* elem, handle_t& thread_handle, std::intmax_t id) {
+  auto& enq = thread_handle.enq_req;
   enq.val.store(elem, relaxed);
   enq.id.store(id, release);
 
-  int64_t i;
+  std::intmax_t i;
   do {
     i = this->m_enq_idx.fetch_add(1, relaxed);
-    auto [cell, _ignore] = find_cell(th.tail, th, i);
+    auto [cell, _ignore] = find_cell(thread_handle.tail, thread_handle, i);
 
     enq_req_t* expected = nullptr;
     if (
@@ -294,8 +300,8 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
   } while (enq.id.load(relaxed) > 0);
 
   id = -enq.id.load(relaxed);
-  auto [cell, curr] = find_cell(th.tail, th, id);
-  th.tail.store(&curr, relaxed);
+  auto [cell, curr] = find_cell(thread_handle.tail, thread_handle, id);
+  thread_handle.tail.store(&curr, relaxed);
 
   if (id > i) {
     auto lEi = this->m_enq_idx.load(relaxed);
@@ -309,7 +315,7 @@ void erased_queue_t::enq_slow(void* elem, handle_t& th, int64_t id) {
   cell.val.store(elem, relaxed);
 }
 
-void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
+void* erased_queue_t::help_enq(cell_t& cell, handle_t& thread_handle, std::intmax_t node_id) {
   auto res = cell.val.load(acquire);
 
   if (res != top_ptr<void>() && res != nullptr) {
@@ -329,27 +335,27 @@ void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
   auto enq = cell.enq_req.load(relaxed);
 
   if (enq == nullptr) {
-    auto ph = th.enq_help_handle;
+    auto ph = thread_handle.enq_help_handle;
     auto pe = &ph->enq_req;
     auto id = pe->id.load(relaxed);
 
-    if (th.Ei != 0 && th.Ei != id) {
-      th.Ei = 0;
-      th.enq_help_handle = ph->next;
-      ph = th.enq_help_handle;
+    if (thread_handle.Ei != 0 && thread_handle.Ei != id) {
+      thread_handle.Ei = 0;
+      thread_handle.enq_help_handle = ph->next;
+      ph = thread_handle.enq_help_handle;
       pe = &ph->enq_req;
       id = pe->id;
     }
 
     if (
-        id > 0 && id <= i
+        id > 0 && id <= node_id
         && !cell.enq_req.compare_exchange_strong(enq, pe, relaxed, relaxed)
         && enq != pe
     ) {
-      th.Ei = id;
+      thread_handle.Ei = id;
     } else {
-      th.Ei = 0;
-      th.enq_help_handle = ph->next;
+      thread_handle.Ei = 0;
+      thread_handle.enq_help_handle = ph->next;
     }
 
     if (
@@ -362,26 +368,26 @@ void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
   }
 
   if (enq == top_ptr<enq_req_t>()) {
-    return (this->m_enq_idx.load(relaxed) <= i ? nullptr : top_ptr<void>());
+    return (this->m_enq_idx.load(relaxed) <= node_id ? nullptr : top_ptr<void>());
   }
 
   auto enq_id = enq->id.load(acquire);
   const auto enq_val = enq->val.load(acquire);
 
-  if (enq_id > i) {
+  if (enq_id > node_id) {
     if (
         cell.val.load(relaxed) == top_ptr<void>()
-        && this->m_enq_idx.load(relaxed) <= i
+        && this->m_enq_idx.load(relaxed) <= node_id
     ) {
       return nullptr;
     }
   } else {
     if (
-        (enq_id > 0 && enq->id.compare_exchange_strong(enq_id, -i, relaxed, relaxed))
-        || (enq_id == -i && cell.val.load(relaxed) == top_ptr<void>())
+        (enq_id > 0 && enq->id.compare_exchange_strong(enq_id, -node_id, relaxed, relaxed))
+        || (enq_id == -node_id && cell.val.load(relaxed) == top_ptr<void>())
     ) {
       auto lEi = this->m_enq_idx.load(relaxed);
-      while (lEi <= i && !this->m_enq_idx.compare_exchange_strong(lEi, i + 1, relaxed, relaxed)) {}
+      while (lEi <= node_id && !this->m_enq_idx.compare_exchange_strong(lEi, node_id + 1, relaxed, relaxed)) {}
       cell.val.store(enq_val, relaxed);
     }
   }
@@ -391,7 +397,7 @@ void* erased_queue_t::help_enq(cell_t& cell, handle_t& th, int64_t i) {
 
 /********** private methods (dequeue) *************************************************************/
 
-void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
+void* erased_queue_t::deq_fast(handle_t& th, std::intmax_t& id) {
   // increment dequeue index
   const auto i = this->m_deq_idx.fetch_add(1, seq_cst);
   auto [cell, curr] = find_cell(th.head, th, i);
@@ -414,7 +420,7 @@ void* erased_queue_t::deq_fast(handle_t& th, int64_t& id) {
   return top_ptr<void>();
 }
 
-void* erased_queue_t::deq_slow(handle_t& th, int64_t id) {
+void* erased_queue_t::deq_slow(handle_t& th, std::intmax_t id) {
   auto& deq = th.deq_req;
   deq.id.store(id, release);
   deq.idx.store(id, release);

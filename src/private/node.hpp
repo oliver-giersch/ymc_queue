@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 
 #include "private/detail.hpp"
 
@@ -15,7 +16,7 @@ struct alignas(64) cell_t {
 
 struct node_t {
   alignas(64) std::atomic<node_t*> next{nullptr};
-  alignas(64) int64_t id{ 0 };
+  alignas(64) std::intmax_t id{ 0 };
   alignas(64) std::array<cell_t, NODE_SIZE> cells{};
 };
 }
